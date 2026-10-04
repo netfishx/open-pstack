@@ -32,7 +32,7 @@ pstack does not ask you to trust an agent on day one. It helps the agent leave e
 
 ## Install
 
-You need a current Claude Code or Codex installation. For the full three-model review, install and sign in to the Claude Code, Codex, and Grok command-line tools. [Bun](https://bun.sh) runs the small local tool that starts models outside the app you are using. You can still use the core workflows with fewer models.
+You need a current Claude Code or Codex installation. For the full three-model review, install and sign in to the Claude Code, Codex, and Pi command-line tools. [Bun](https://bun.sh) runs the small local tool that starts models outside the app you are using. You can still use the core workflows with fewer models.
 
 ### Claude Code
 
@@ -80,11 +80,11 @@ In Codex, ask:
 Use pstack:setup-pstack to configure pstack.
 ```
 
-Setup checks the models you can actually run, shows how each one will start, and asks before saving the choices. The default review panel uses Opus, GPT-5.6 Sol, and Grok 4.7, and setup probes only the models your roles use. Fable remains available.
+Setup checks the models you can actually run, shows how each one will start, and asks before saving the choices. The default review panel uses Opus, GPT-6.1 Sol, and Pi, and setup probes only the models your roles use. Fable remains available.
 
 An older model sheet starts using the rolling aliases in memory as soon as this release is installed. Run setup once after updating to persist that migration. It replaces versioned Fable and Opus entries while preserving every role assignment and effort selection.
 
-A model sheet from an earlier release keeps its panel. To take the new defaults, delete those role lines and run setup again; setup fills missing roles from the defaults. A `grok:grok-4.6` entry keeps running until the next setup run asks you to replace it.
+A model sheet from an earlier release keeps its panel. To take the new defaults, delete those role lines and run setup again; setup fills missing roles from the defaults. An entry from an earlier release keeps running until the next setup run asks you to replace it.
 
 ### 2. Use poteto-mode
 
@@ -136,10 +136,10 @@ Both apps read the same pstack skills. Only the way they start those skills and 
 | --- | --- | --- |
 | Start poteto-mode | Claude loads a small startup instruction that can route non-trivial work into it. You can also run `/pstack:poteto-mode` yourself. | Ask for `pstack:poteto-mode` by name. Codex does not load the Claude startup instruction. |
 | Runs inside the app | Claude models stay inside Claude Code. | The Sol model stays inside Codex. |
-| Other models | Codex and Grok run through their signed-in command-line tools. | Claude and Grok run through their signed-in command-line tools. |
+| Other models | Codex and Pi run through their signed-in command-line tools. | Claude and Pi run through their signed-in command-line tools. |
 | Skills and workflows | Shared with Codex. | Shared with Claude Code. |
 
-Grok can take part in a multi-model review. You cannot use Grok as the main app running pstack.
+Pi can take part in a multi-model review. Pi is not a parent harness for pstack.
 
 ## Learn from the original
 

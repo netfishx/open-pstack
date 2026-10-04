@@ -11,11 +11,11 @@ pstack model choices are provider-qualified descriptors:
 | Family | Upstream pstack choice | Provider | Model | Default effort | Selectable efforts | Claude-native agent stem |
 |---|---|---|---|---|---|---|
 | fable | - | claude | fable | max | low medium high xhigh max | fable |
-| sol | gpt-5.6-sol-max | codex | gpt-5.6-sol | max | low medium high xhigh max | - |
-| grok | grok-4.7-xhigh-fast | grok | grok-4.7 | xhigh | low medium high xhigh max | - |
+| sol | gpt-5.6-sol-max | codex | gpt-6.1-sol | high | low medium high xhigh max | - |
+| pi | - | pi | default | high | low medium high xhigh max | - |
 | opus | opus | claude | opus | max | low medium high xhigh max | opus |
 
-The allowed effort universe is exactly `low`, `medium`, `high`, `xhigh`, `max`. First-run requested efforts are the Default effort cell of each row. The first-run panel is Opus, Sol, and Grok, in that order. Fable stays selectable, but no first-run role uses it. A Claude-native agent stem of `-` means the family has no Claude-native agent. Otherwise the shipped agent name is `pstack-<stem>-<effort>`.
+The allowed effort universe is exactly `low`, `medium`, `high`, `xhigh`, `max`. First-run requested efforts are the Default effort cell of each row. The first-run panel is Opus, Sol, and Pi, in that order. Fable stays selectable, but no first-run role uses it. A Claude-native agent stem of `-` means the family has no Claude-native agent. Otherwise the shipped agent name is `pstack-<stem>-<effort>`.
 
 `fable` and `opus` are Claude Code's rolling aliases. Claude resolves each alias to the latest available family revision. A runner receipt keeps the requested alias in `model` and the concrete provider-reported revision in `reportedModel`; verification accepts only a numeric `claude-fable-*` or `claude-opus-*` revision from the matching family.
 
@@ -25,13 +25,11 @@ Normalize configured descriptors before matching them to the matrix or choosing 
 
 This read-time rule makes an older installed sheet use the latest family revision immediately without writing user files. Once per parent run, report that the persisted sheet is stale and that `/setup-pstack` will rewrite it after its normal probes and confirmation. Unknown versioned Claude models remain invalid. The external runner rejects a missed Fable or Opus version pin instead of silently executing it.
 
-`fast` is part of Cursor's Grok selector, not a Grok Build CLI model or effort flag. The portable Grok route pins the current CLI model `grok-4.7`. The first-run Grok effort is `xhigh`.
-
 ## The parent owns the route
 
 The top-level harness resolves the route once. A child receives an assigned provider, model, effort, access mode, prompt, working directory, and output path. A child never detects the harness, chooses a provider, or launches another model. Environment markers may corroborate the top-level harness before fan-out, but nested processes inherit parent markers and must not use them for routing.
 
-| Parent | `claude:*` | `codex:*` | `grok:*` |
+| Parent | `claude:*` | `codex:*` | `pi:*` |
 |---|---|---|---|
 | Claude Code | native `Agent` | external runner | external runner |
 | Codex | external runner | native `spawn_agent` | external runner |
@@ -54,8 +52,8 @@ The launcher lives at `skills/poteto-mode/scripts/runner/pstack-runner` under th
 ```text
 pstack-runner \
   --parent <claude|codex> \
-  --provider <claude|codex|grok> \
-  --model <real CLI model> \
+  --provider <claude|codex|pi> \
+  --model <descriptor model> \
   --effort <low|medium|high|xhigh|max> \
   --mode <read-only|isolated-write> \
   --prompt <unique prompt file> \
@@ -67,7 +65,7 @@ pstack-runner \
 
 Pass arguments as an argv array or quote every path. Never interpolate prompt text into a shell command. The launcher preflights the assigned CLI and authentication, invokes the model exactly once, disables recursive agents and ambient skill dispatch where the CLI supports it, restricts the built-in tool surface, and records the exact provider/model/effort flags. External lanes do not receive the parent's MCP surface. Keep MCP-dependent Why and Reflect roles on `inherit-parent` or `auto`. The launcher never falls back.
 
-Grok authentication preflight has one bounded retry. If the first `grok models` result would be classified as unauthenticated, the runner waits five seconds and tries the same preflight once more. A second failure is terminal. The delay and second attempt share the runner's absolute deadline and cancellation latch, and the receipt keeps evidence from both attempts. Model execution is never retried.
+The pi lane resolves its model from pi's global settings. The runner reads `settings.json` under the directory named by `PI_CODING_AGENT_DIR` (default `~/.pi/agent`), takes the string fields `defaultProvider` and `defaultModel`, and pins both as `--provider` and `--model`. `default` is the only legal pi model value. The receipt keeps the requested `default` in `model` and the resolved `<provider>/<model>` in `resolvedModel`; the provider report must match that resolved pair. A missing settings file, invalid JSON, or a missing or non-string field is an `unavailable-model` dropout before any child starts, and the receipt names the path and the missing item. The runner does not read project-level `.pi/settings.json`; the explicit `--provider` and `--model` argv make any project override irrelevant. Model execution is never retried.
 
 The parent tool sandbox still governs whether a subscribed child CLI can reach its credentials and network. Run setup's live probe from the actual parent profile. A blocked external CLI is a loud dropout, not a reason to elevate permissions or substitute a model silently.
 
@@ -80,7 +78,7 @@ Start the background process, continue launching the other lanes, then drain the
 
 The runner and its preflight have no implicit timeout. Do not invent a duration from role, mode, or a convenient round number; real implementation lanes can run for 90 minutes or much longer. Pass `--timeout` only when the user, an external service deadline, or a measured task contract supplies a real bound. That value starts at wrapper entry, before module loading and argument parsing, and remains one absolute deadline across setup, preflight, model execution, and output capture. It is never a fresh allowance per child, and long waits are armed in runtime-safe chunks without shortening the supplied deadline. Otherwise supervise liveness through the retained background task/session handle and cancel manually only on evidence that the run is dead. Cancel through that retained handle so the runner receives SIGINT or SIGTERM, sends it to an active child when one remains, stops waiting on inherited output pipes, removes the empty output reservation, and writes a `cancelled` receipt. Preserve that receipt; a retry is a new attempt with new unique output and receipt paths. Unchanged running state is not a dropout, and Claude's ten-minute foreground ceiling is never a reason to terminate a healthy lane.
 
-Read-only mode maps to Claude plan mode with project-only settings and an explicit tool list, Codex's read-only sandbox, and Grok auto mode plus its `read-only` sandbox and read-oriented tool list. Headless Grok cancels the whole turn on a permission prompt, which its `plan` mode raises for any shell command outside its built-in read-only list; auto mode reports a blocked call to the model instead. Grok's built-in read-only profile deliberately keeps its own state and system temporary directories writable, so point a read-only Grok lane at the actual checkout rather than a worktree under `/tmp`, `/var/tmp`, or the host's temporary directory. `isolated-write` maps to Claude `acceptEdits` with project-only settings, Codex `workspace-write`, and Grok auto mode plus its `workspace` sandbox and write-capable tool list. Grok uses auto mode in both access modes because `acceptEdits` raises the same turn-cancelling prompt for a shell command outside Grok's built-in list. Give every writer only a dedicated worktree or output directory. Never route a writer into the primary checkout.
+Read-only mode maps to Claude plan mode with project-only settings and an explicit tool list, Codex's read-only sandbox, and the pi runner's `--tools read,grep,find,ls`, which omits `bash`. The pi lane passes `--no-context-files` so the child does not load the global `AGENTS.md`, whose commit and push instructions conflict with a bounded subtask. It also passes `--no-session`, `--no-extensions`, `--no-skills`, and `--no-prompt-templates` so the child starts without ambient state. `isolated-write` maps to Claude `acceptEdits` with project-only settings, Codex `workspace-write`, and the pi runner's `--tools read,grep,find,ls,bash,edit,write`. Give every writer only a dedicated worktree or output directory. Never route a writer into the primary checkout.
 
 Every concurrent external lane needs distinct prompt, output, and receipt paths. The launcher reserves output and receipt paths exclusively and refuses to overwrite them.
 
@@ -90,7 +88,7 @@ Success requires all of these:
 
 1. Exit status `0`.
 2. Receipt status `complete`.
-3. Either `modelVerified: true` with `modelEvidence: "provider-report"`, or a Codex receipt with `reportedModel: null`, `modelVerified: false`, and `modelEvidence: "pinned-argv"`. For Claude's `fable` and `opus` aliases, the concrete provider report must belong to the requested family. Codex 0.149.0 accepts the exact `--model` argument but does not report the served model in its JSONL stream.
+3. Either `modelVerified: true` with `modelEvidence: "provider-report"`, or a Codex receipt with `reportedModel: null`, `modelVerified: false`, and `modelEvidence: "pinned-argv"`. For Claude's `fable` and `opus` aliases, the concrete provider report must belong to the requested family. The pi lane's provider report must equal the resolved `<provider>/<model>`. Codex accepts the exact `--model` argument but does not report the served model in its JSONL stream. The pi lane also verifies the applied thinking level from the assistant message's `thinkingLevel` against the requested effort; a mismatch is an `unavailable-model` dropout with no downgrade and no retry.
 4. A non-empty output file.
 
 The receipt also carries elapsed time, token usage when the CLI exposes it, and cost when available. Keep it with the arena or review artifacts so parent-harness comparisons are evidence-based.

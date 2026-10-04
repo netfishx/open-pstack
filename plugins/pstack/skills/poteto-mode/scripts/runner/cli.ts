@@ -13,15 +13,17 @@ import {
   UsageError,
 } from "./types.ts";
 
-const HELP = `Usage: pstack-runner --parent <claude|codex> --provider <claude|codex|grok> \\
+const HELP = `Usage: pstack-runner --parent <claude|codex> --provider <claude|codex|pi> \\
   --model <slug> --effort <level> --mode <read-only|isolated-write> \\
   --prompt <file> --cwd <dir> --output <file> --receipt <file> [--timeout <seconds>]
 
 Runs exactly one external model lane. Same-provider calls are rejected; use the
-parent harness's native subagent primitive for those lanes. Output and receipt
-paths must not already exist. There is no implicit timeout. Pass --timeout only
-when the user or task supplies a real deadline; it is one end-to-end launcher
-deadline shared by setup, preflight, and model execution.
+parent harness's native subagent primitive for those lanes. The pi provider
+accepts only the literal model \`default\`, which runs pi's global default
+provider and model from settings.json. Output and receipt paths must not already
+exist. There is no implicit timeout. Pass --timeout only when the user or task
+supplies a real deadline; it is one end-to-end launcher deadline shared by
+setup, preflight, and model execution.
 `;
 
 interface Io {

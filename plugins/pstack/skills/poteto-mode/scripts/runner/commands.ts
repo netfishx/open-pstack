@@ -1,7 +1,6 @@
 import type {
   AccessMode,
   Effort,
-  Provider,
   RunnerOptions,
 } from "./types.ts";
 
@@ -11,8 +10,17 @@ export interface CommandSpec {
   readonly stdin: "prompt" | "none";
 }
 
-export function preflightCommand(provider: Provider): CommandSpec {
-  switch (provider) {
+export type LaneTarget =
+  | { readonly provider: "claude"; readonly model: string }
+  | { readonly provider: "codex"; readonly model: string }
+  | {
+      readonly provider: "pi";
+      readonly model: string;
+      readonly defaultProvider: string;
+    };
+
+export function preflightCommand(target: LaneTarget): CommandSpec {
+  switch (target.provider) {
     case "claude":
       return {
         command: "claude",
@@ -25,8 +33,20 @@ export function preflightCommand(provider: Provider): CommandSpec {
         args: ["login", "status"],
         stdin: "none",
       };
-    case "grok":
-      return { command: "grok", args: ["models"], stdin: "none" };
+    case "pi":
+      return {
+        command: "pi",
+        args: [
+          "auth",
+          "check",
+          "--provider",
+          target.defaultProvider,
+          "--model",
+          target.model,
+          "--json",
+        ],
+        stdin: "none",
+      };
   }
 }
 
@@ -46,13 +66,9 @@ function codexSandbox(mode: AccessMode): string {
   return mode === "read-only" ? "read-only" : "workspace-write";
 }
 
-function grokSandbox(mode: AccessMode): string {
-  return mode === "read-only" ? "read-only" : "workspace";
-}
-
-function grokTools(mode: AccessMode): string {
-  const readonly = ["read_file", "grep", "list_dir", "run_terminal_cmd"];
-  return [...readonly, ...(mode === "isolated-write" ? ["search_replace"] : [])].join(",");
+function piTools(mode: AccessMode): string {
+  const readonly = ["read", "grep", "find", "ls"];
+  return [...readonly, ...(mode === "isolated-write" ? ["bash", "edit", "write"] : [])].join(",");
 }
 
 function permissionMode(mode: AccessMode): string {
@@ -63,15 +79,18 @@ function effortOverride(effort: Effort): string {
   return `model_reasoning_effort=${JSON.stringify(effort)}`;
 }
 
-export function invocationCommand(options: RunnerOptions): CommandSpec {
-  switch (options.provider) {
+export function invocationCommand(
+  options: RunnerOptions,
+  target: LaneTarget
+): CommandSpec {
+  switch (target.provider) {
     case "claude":
       return {
         command: "claude",
         args: [
           "-p",
           "--model",
-          options.model,
+          target.model,
           "--effort",
           options.effort,
           "--permission-mode",
@@ -96,7 +115,7 @@ export function invocationCommand(options: RunnerOptions): CommandSpec {
         args: [
           "exec",
           "--model",
-          options.model,
+          target.model,
           "--config",
           effortOverride(options.effort),
           "--sandbox",
@@ -118,36 +137,28 @@ export function invocationCommand(options: RunnerOptions): CommandSpec {
         ],
         stdin: "prompt",
       };
-    case "grok":
+    case "pi":
       return {
-        command: "grok",
+        command: "pi",
         args: [
-          "--prompt-file",
-          options.promptPath,
+          "-p",
+          "--mode",
+          "json",
+          "--no-session",
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-context-files",
+          "--provider",
+          target.defaultProvider,
           "--model",
-          options.model,
-          "--reasoning-effort",
+          target.model,
+          "--thinking",
           options.effort,
-          // Headless Grok cancels the whole turn on a permission prompt, in both access modes.
-          // Auto mode reports a blocked call to the model instead; the sandbox still confines
-          // writes (read-only, or workspace for isolated-write).
-          "--permission-mode",
-          "auto",
-          "--sandbox",
-          grokSandbox(options.mode),
           "--tools",
-          grokTools(options.mode),
-          "--disallowed-tools",
-          "Agent,search_tool,use_tool",
-          "--output-format",
-          "streaming-messages-json",
-          "--cwd",
-          options.cwd,
-          "--no-subagents",
-          "--disable-web-search",
-          "--verbatim",
+          piTools(options.mode),
         ],
-        stdin: "none",
+        stdin: "prompt",
       };
   }
 }

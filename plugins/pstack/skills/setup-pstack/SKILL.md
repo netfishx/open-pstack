@@ -55,7 +55,7 @@ Probe only the selected `provider:model@effort` pair of each assigned family. Ru
 |---|---|---|---|---|
 | Fable | Fable matrix row + selected effort | native Agent `pstack-fable-<effort>` | Claude CLI | native one-turn probe or `claude auth status --json` plus one-turn probe |
 | Sol | Sol matrix row + selected effort | `codex exec` | native `spawn_agent` | `codex login status` plus one-turn probe or native one-turn probe |
-| Grok | Grok matrix row + selected effort | Grok CLI | Grok CLI | `grok models` must list the requested model; one-turn probe |
+| Pi | Pi matrix row + selected effort | pi external runner | pi external runner | pi auth check plus one-turn probe |
 | Opus | Opus matrix row + selected effort | native Agent `pstack-opus-<effort>` | Claude CLI | native one-turn probe or `claude auth status --json` plus one-turn probe |
 
 Use a tiny read-only probe that returns a unique marker. A login-status command alone proves credentials, not that the requested model and effort flags run. Record native and external results separately. Never call the external launcher for the parent's own provider. On a Claude parent, the Fable and Opus probes are one-turn runs of the mapped `pstack-<stem>-<effort>` agent. On a Codex parent, the Sol probe is native `spawn_agent` with the selected `reasoning_effort`. Every other pair uses the external runner with the selected effort flag.
@@ -69,7 +69,7 @@ Build the new sheet in memory. Do not write it yet.
 - First run: start from the complete role assignments in step 7, with the step 2 role changes applied.
 - Rerun: start from the normalized complete role map from step 2, with the step 2 role changes applied, preserving each loaded row's lane order and family (or alias) per lane.
 
-Rewrite every matrix-family descriptor to `provider:model@<requested effort for that family>`. Leave `inherit-parent` and `auto` unchanged. An effort-only rerun cannot change a role's family. Changing Grok's effort updates every Grok occurrence and does not move a Sol role onto Grok. Refuse an unqualified slug, an unavailable route, a model outside the model matrix, or a provider/model mismatch.
+Rewrite every matrix-family descriptor to `provider:model@<requested effort for that family>`. Leave `inherit-parent` and `auto` unchanged. An effort-only rerun cannot change a role's family. Changing Pi's effort updates every Pi occurrence and does not move a Sol role onto Pi. Refuse an unqualified slug, an unavailable route, a model outside the model matrix, or a provider/model mismatch.
 
 ### 7. Confirm and commit
 
@@ -86,21 +86,21 @@ After the operator confirms, write the in-memory render from step 6. Never paste
 
 Provider-qualified per-role choices. Read the installed pstack provider-dispatch reference before dispatching a configured role. Every documented role remains present. `inherit-parent` and `auto` use the parent model natively and still count as one panel lane.
 
-feature, refactoring: grok:grok-4.7@xhigh
-bug-fix: codex:gpt-5.6-sol@max
-perf-issue: codex:gpt-5.6-sol@max
-hillclimb: codex:gpt-5.6-sol@max
+feature, refactoring: pi:default@high
+bug-fix: codex:gpt-6.1-sol@high
+perf-issue: codex:gpt-6.1-sol@high
+hillclimb: codex:gpt-6.1-sol@high
 judgment and prose: claude:opus@max
 hardest tasks: claude:opus@max
-how explorer: grok:grok-4.7@xhigh
+how explorer: pi:default@high
 how explainer: claude:opus@max
 why investigators, synthesizer: inherit-parent
 reflect tooling, judgment, divergent, synthesizer: inherit-parent
-arena runners: claude:opus@max, codex:gpt-5.6-sol@max, grok:grok-4.7@xhigh
-arena cross-judge pool: claude:opus@max, codex:gpt-5.6-sol@max, grok:grok-4.7@xhigh
-swarm workers: grok:grok-4.7@xhigh
-architect runners: claude:opus@max, codex:gpt-5.6-sol@max, grok:grok-4.7@xhigh
-interrogate reviewers: claude:opus@max, codex:gpt-5.6-sol@max, grok:grok-4.7@xhigh
+arena runners: claude:opus@max, codex:gpt-6.1-sol@high, pi:default@high
+arena cross-judge pool: claude:opus@max, codex:gpt-6.1-sol@high, pi:default@high
+swarm workers: pi:default@high
+architect runners: claude:opus@max, codex:gpt-6.1-sol@high, pi:default@high
+interrogate reviewers: claude:opus@max, codex:gpt-6.1-sol@high, pi:default@high
 ```
 
 ### 8. Wire it in

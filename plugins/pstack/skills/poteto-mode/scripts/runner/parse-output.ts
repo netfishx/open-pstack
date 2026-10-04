@@ -81,36 +81,81 @@ function parseClaude(stdout: string, requestedModel: string): ParsedOutput {
     sessionId: nullableString(value.session_id ?? value.sessionId),
     usage: normalizedUsage(value.usage),
     costUsd: finiteNumber(value.total_cost_usd) ?? null,
+    appliedEffort: null,
   };
 }
 
-function parseGrok(stdout: string, requestedModel: string): ParsedOutput {
-  let result: JsonObject | null = null;
+function parsePi(stdout: string): ParsedOutput {
+  let assistant: JsonObject | null = null;
+  let sessionId: string | null = null;
+
   for (const line of stdout.split("\n")) {
     if (line.trim().length === 0) continue;
     let raw: unknown;
     try {
       raw = JSON.parse(line);
     } catch {
-      throw new Error("grok emitted a non-JSON event");
+      throw new Error("pi emitted a non-JSON event");
     }
     const event = object(raw);
-    if (event?.type === "result") result = event;
+    if (event === null) continue;
+    if (event.type === "session") {
+      sessionId = nullableString(event.id) ?? sessionId;
+    }
+    if (event.type === "message_end") {
+      const message = object(event.message);
+      if (message?.role === "assistant") assistant = message;
+    }
   }
 
-  if (result === null) throw new Error("grok result did not contain a terminal event");
-  if (result.is_error === true || result.subtype !== "success") {
-    throw new Error("grok reported an error result");
+  if (assistant === null) {
+    throw new Error("pi result did not contain an assistant message_end event");
   }
-  const text = nullableString(result.result);
-  if (text === null) throw new Error("grok result did not contain final text");
+  if (assistant.stopReason !== "stop") {
+    throw new Error(`pi assistant message stopped with ${String(assistant.stopReason)}`);
+  }
+
+  const content = Array.isArray(assistant.content) ? assistant.content : [];
+  let text = "";
+  for (const item of content) {
+    const part = object(item);
+    if (part?.type === "text" && typeof part.text === "string") {
+      text += part.text;
+    }
+  }
+  if (text.length === 0) throw new Error("pi result did not contain final text");
+
+  const assistantProvider = nullableString(assistant.provider);
+  const assistantModel = nullableString(assistant.model);
+  const reportedModel = assistantProvider !== null && assistantModel !== null
+    ? `${assistantProvider}/${assistantModel}`
+    : null;
+
+  const usage = object(assistant.usage);
+  const normalizedUsageValue: NormalizedUsage | null = usage === null
+    ? null
+    : (() => {
+      const candidate: NormalizedUsage = {
+        inputTokens: finiteNumber(usage.input),
+        cachedInputTokens: finiteNumber(usage.cacheRead),
+        cacheCreationInputTokens: finiteNumber(usage.cacheWrite),
+        outputTokens: finiteNumber(usage.output),
+        reasoningTokens: finiteNumber(usage.reasoning),
+        totalTokens: finiteNumber(usage.totalTokens),
+      };
+      return Object.values(candidate).some((entry) => entry !== undefined)
+        ? candidate
+        : null;
+    })();
+  const cost = object(usage?.cost);
 
   return {
     text,
-    reportedModel: modelFromUsage(result.modelUsage, "grok", requestedModel),
-    sessionId: nullableString(result.session_id),
-    usage: normalizedUsage(result.usage),
-    costUsd: finiteNumber(result.total_cost_usd) ?? null,
+    reportedModel,
+    sessionId,
+    usage: normalizedUsageValue,
+    costUsd: finiteNumber(cost?.total) ?? null,
+    appliedEffort: nullableString(assistant.thinkingLevel),
   };
 }
 
@@ -154,6 +199,7 @@ function parseCodex(stdout: string): ParsedOutput {
     sessionId,
     usage,
     costUsd: null,
+    appliedEffort: null,
   };
 }
 
@@ -168,8 +214,8 @@ export function parseProviderOutput(
       return parseClaude(stdout, requestedModel);
     case "codex":
       return parseCodex(stdout);
-    case "grok":
-      return parseGrok(stdout, requestedModel);
+    case "pi":
+      return parsePi(stdout);
   }
 }
 
@@ -179,6 +225,7 @@ export function reportedModelMatches(
   reported: string | null
 ): boolean {
   if (reported === null) return false;
+  if (provider === "pi") return reported === requested;
   if (provider === "claude" && isRollingClaudeAlias(requested)) {
     return concreteModelMatchesRollingAlias(requested, reported);
   }

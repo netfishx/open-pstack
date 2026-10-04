@@ -1,5 +1,5 @@
 export const PARENTS = ["claude", "codex"] as const;
-export const PROVIDERS = ["claude", "codex", "grok"] as const;
+export const PROVIDERS = ["claude", "codex", "pi"] as const;
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export const ACCESS_MODES = ["read-only", "isolated-write"] as const;
 
@@ -46,6 +46,7 @@ export interface ParsedOutput {
   readonly sessionId: string | null;
   readonly usage: NormalizedUsage | null;
   readonly costUsd: number | null;
+  readonly appliedEffort: string | null;
 }
 
 export interface RunnerReceipt {
@@ -72,11 +73,13 @@ export interface RunnerReceipt {
   readonly exitCode: number | null;
   readonly signal: string | null;
   readonly reportedModel: string | null;
+  readonly resolvedModel: string | null;
   readonly modelVerified: boolean;
   readonly modelEvidence: "provider-report" | "pinned-argv" | null;
   readonly sessionId: string | null;
   readonly usage: NormalizedUsage | null;
   readonly costUsd: number | null;
+  readonly appliedEffort: string | null;
   readonly error: {
     readonly message: string;
     readonly evidence: string;
