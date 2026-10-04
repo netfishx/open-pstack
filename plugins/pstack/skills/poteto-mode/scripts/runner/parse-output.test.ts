@@ -21,6 +21,7 @@ describe("parseProviderOutput", () => {
       sessionId: "claude-session",
       usage: { inputTokens: 10, outputTokens: 3 },
       costUsd: 0.05,
+      appliedEffort: null,
     });
   });
 
@@ -43,8 +44,8 @@ describe("parseProviderOutput", () => {
           },
         }),
       ].join("\n"),
-      "model: gpt-5.6-sol\nreasoning effort: max\n",
-      "gpt-5.6-sol"
+      "model: gpt-6.1-sol\nreasoning effort: high\n",
+      "gpt-6.1-sol"
     );
     expect(parsed).toMatchObject({
       text: "CODEX_OK",
@@ -56,42 +57,119 @@ describe("parseProviderOutput", () => {
         outputTokens: 5,
         reasoningTokens: 2,
       },
+      appliedEffort: null,
     });
   });
 
-  it("accepts Grok's reported build suffix", () => {
+  it("drops pi thinking blocks and keeps the resolved model, usage, cost, and applied effort", () => {
     const parsed = parseProviderOutput(
-      "grok",
+      "pi",
       [
         JSON.stringify({
-          type: "assistant",
-          message: { content: [{ type: "text", text: "progress" }] },
+          type: "session",
+          version: 3,
+          id: "pi-session",
+          cwd: "/tmp/worktree",
         }),
         JSON.stringify({
-          type: "result",
-          subtype: "success",
-          is_error: false,
-          result: "GROK_OK",
-          session_id: "grok-session",
-          usage: {
-            input_tokens: 30,
-            cache_read_input_tokens: 6,
-            output_tokens: 7,
-            reasoning_tokens: 3,
-            total_tokens: 43,
+          type: "message_end",
+          message: { role: "user", content: "Return the marker." },
+        }),
+        JSON.stringify({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            provider: "magpie",
+            model: "auto-deepseek-v4-1-flash",
+            content: [
+              { type: "thinking", thinking: "internal reasoning" },
+              { type: "text", text: "PI_OK" },
+            ],
+            stopReason: "stop",
+            thinkingLevel: "xhigh",
+            usage: {
+              input: 30,
+              output: 7,
+              cacheRead: 6,
+              cacheWrite: 1,
+              reasoning: 3,
+              totalTokens: 44,
+              cost: { total: 0.02 },
+            },
           },
-          total_cost_usd: 0.02,
-          modelUsage: { "grok-4.6-build": {} },
         }),
       ].join("\n"),
       "",
-      "grok-4.6"
+      "magpie/auto-deepseek-v4-1-flash"
     );
-    expect(parsed.text).toBe("GROK_OK");
-    expect(parsed.reportedModel).toBe("grok-4.6-build");
-    expect(reportedModelMatches("grok", "grok-4.6", parsed.reportedModel)).toBe(
-      true
-    );
+    expect(parsed).toMatchObject({
+      text: "PI_OK",
+      reportedModel: "magpie/auto-deepseek-v4-1-flash",
+      sessionId: "pi-session",
+      usage: {
+        inputTokens: 30,
+        outputTokens: 7,
+        cachedInputTokens: 6,
+        cacheCreationInputTokens: 1,
+        reasoningTokens: 3,
+        totalTokens: 44,
+      },
+      costUsd: 0.02,
+      appliedEffort: "xhigh",
+    });
+    expect(reportedModelMatches(
+      "pi",
+      "magpie/auto-deepseek-v4-1-flash",
+      parsed.reportedModel
+    )).toBe(true);
+  });
+
+  it("selects the last assistant message_end and rejects non-stop or non-JSON streams", () => {
+    const stopped = [
+      JSON.stringify({ type: "session", id: "pi-session" }),
+      JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          provider: "magpie",
+          model: "m",
+          content: [{ type: "text", text: "first" }],
+          stopReason: "stop",
+          thinkingLevel: "low",
+        },
+      }),
+      JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          provider: "magpie",
+          model: "m",
+          content: [{ type: "text", text: "last" }],
+          stopReason: "stop",
+          thinkingLevel: "high",
+        },
+      }),
+    ].join("\n");
+    expect(parseProviderOutput("pi", stopped, "", "magpie/m").text).toBe("last");
+
+    const nonStop = [
+      JSON.stringify({ type: "session", id: "pi-session" }),
+      JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          provider: "magpie",
+          model: "m",
+          content: [{ type: "text", text: "partial" }],
+          stopReason: "error",
+        },
+      }),
+    ].join("\n");
+    expect(() => parseProviderOutput("pi", nonStop, "", "magpie/m")).toThrow();
+
+    expect(() =>
+      parseProviderOutput("pi", "not-json", "", "magpie/m")
+    ).toThrow("pi emitted a non-JSON event");
   });
 
   it("selects the requested Claude model when usage includes a side model", () => {
@@ -117,7 +195,9 @@ describe("parseProviderOutput", () => {
     expect(reportedModelMatches("claude", "fable", "claude-fable-beta")).toBe(false);
     expect(reportedModelMatches("claude", "fable", "fable")).toBe(false);
     expect(reportedModelMatches("claude", "fable", "fable-preview")).toBe(false);
-    expect(reportedModelMatches("grok", "fable", "claude-fable-9-9")).toBe(false);
+    expect(reportedModelMatches("pi", "magpie/m", "magpie/m")).toBe(true);
+    expect(reportedModelMatches("pi", "magpie/m", "magpie/m-build")).toBe(false);
+    expect(reportedModelMatches("pi", "fable", "claude-fable-9-9")).toBe(false);
   });
 
   it("rejects malformed or textless responses", () => {
@@ -129,7 +209,7 @@ describe("parseProviderOutput", () => {
         "codex",
         JSON.stringify({ type: "turn.completed" }),
         "",
-        "gpt-5.6-sol"
+        "gpt-6.1-sol"
       )
     ).toThrow("final agent message");
   });

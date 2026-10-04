@@ -18,7 +18,13 @@ import type { Provider, RunnerOptions, RunnerReceipt } from "./types.ts";
 
 let scratch = "";
 let bin = "";
+let piAgentDir = "";
 let previousPath: string | undefined;
+let previousPiDir: string | undefined;
+
+const PI_DEFAULT_PROVIDER = "magpie";
+const PI_DEFAULT_MODEL = "auto-deepseek-v4-1-flash";
+const PI_RESOLVED_MODEL = `${PI_DEFAULT_PROVIDER}/${PI_DEFAULT_MODEL}`;
 
 const fake = `#!/usr/bin/env bun
 import { appendFileSync, existsSync, unlinkSync, writeFileSync } from "node:fs";
@@ -27,7 +33,7 @@ const name = process.argv[1].split("/").at(-1);
 const isPreflight =
   (name === "claude" && args[0] === "auth") ||
   (name === "codex" && args[0] === "login") ||
-  (name === "grok" && args[0] === "models");
+  (name === "pi" && args[0] === "auth");
 const stage = isPreflight ? "preflight" : "model";
 const startedPath = isPreflight
   ? process.env.FAKE_PREFLIGHT_STARTED_PATH
@@ -51,7 +57,7 @@ const delay = Number(
     : process.env.FAKE_MODEL_DELAY_MS ?? 0
 );
 if (delay > 0) await Bun.sleep(delay);
-if (process.env.FAKE_TIMEOUT === "1" && !args.includes("status") && !args.includes("models")) {
+if (process.env.FAKE_TIMEOUT === "1" && !isPreflight) {
   await Bun.sleep(5_000);
 }
 if (name === "claude" && args[0] === "auth") {
@@ -65,26 +71,19 @@ if (name === "codex" && args[0] === "login") {
   console.log("Logged in using ChatGPT");
   process.exit(0);
 }
-if (name === "grok" && args[0] === "models") {
-  if (process.env.FAKE_GROK_PREFLIGHT_LOG_PATH) {
-    appendFileSync(process.env.FAKE_GROK_PREFLIGHT_LOG_PATH, "attempt\\n");
+if (name === "pi" && args[0] === "auth") {
+  if (process.env.FAKE_PI_PREFLIGHT_LOG_PATH) {
+    appendFileSync(process.env.FAKE_PI_PREFLIGHT_LOG_PATH, "attempt\\n");
   }
-  const transientMarker = process.env.FAKE_GROK_TRANSIENT_UNAUTH_PATH;
-  if (transientMarker && !existsSync(transientMarker)) {
-    writeFileSync(transientMarker, String(process.pid));
-    console.log("Available models:\\n  * grok-4.6 (default)");
-    console.error("You are not authenticated.");
-    process.exit(0);
-  }
-  if (process.env.FAKE_GROK_MISSING_MODEL === "1") {
-    console.log("You are logged in with grok.com.\\nAvailable models:\\n  * grok-4.5 (default)");
-    process.exit(0);
-  }
-  if (process.env.FAKE_GROK_UNAUTH === "1") {
-    console.error("Not logged in. Run grok auth login.");
+  if (process.env.FAKE_PI_UNAUTH === "1") {
+    console.log(JSON.stringify({status:"not_ready",provider:"magpie",reason:"credentials_not_configured"}));
     process.exit(1);
   }
-  console.log("You are logged in with grok.com.\\nAvailable models:\\n  * grok-4.6 (default)");
+  if (process.env.FAKE_PI_UNKNOWN_PROVIDER === "1") {
+    console.log(JSON.stringify({status:"not_ready",provider:"magpie",reason:"provider_not_found"}));
+    process.exit(1);
+  }
+  console.log(JSON.stringify({status:"ready",provider:"magpie",authType:"oauth"}));
   process.exit(0);
 }
 const modelIndex = args.findIndex((value) => value === "--model");
@@ -120,12 +119,15 @@ if (name === "claude") {
   console.log(JSON.stringify({type:"thread.started",thread_id:"o1"}));
   console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"CODEX_OK"}}));
   console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:20,cached_input_tokens:5,output_tokens:3,reasoning_output_tokens:1}}));
-} else if (process.env.FAKE_GROK_ERROR_RESULT === "1") {
-  console.log(JSON.stringify({type:"system",subtype:"init",skills:Array(500).fill("skill-name")}));
-  console.log(JSON.stringify({type:"result",subtype:"error_during_execution",is_error:true,stop_reason:"cancelled",errors:["cancelled"]}));
 } else {
-  console.log(JSON.stringify({type:"assistant",message:{content:[{type:"text",text:"progress"}]}}));
-  console.log(JSON.stringify({type:"result",subtype:"success",is_error:false,result:"GROK_OK",session_id:"g1",usage:{input_tokens:30,output_tokens:4,total_tokens:34},total_cost_usd:0.02,modelUsage:{[model + "-build"]:{}}}));
+  const providerIndex = args.findIndex((value) => value === "--provider");
+  const provider = providerIndex >= 0 ? args[providerIndex + 1] : "unknown";
+  const thinkingIndex = args.findIndex((value) => value === "--thinking");
+  const thinking = process.env.FAKE_PI_THINKING ??
+    (thinkingIndex >= 0 ? args[thinkingIndex + 1] : "unknown");
+  console.log(JSON.stringify({type:"session",version:3,id:"p1",cwd:process.cwd()}));
+  console.log(JSON.stringify({type:"message_end",message:{role:"user",content:"Return the marker."}}));
+  console.log(JSON.stringify({type:"message_end",message:{role:"assistant",provider,model,content:[{type:"thinking",thinking:"internal reasoning"},{type:"text",text:"PI_OK"}],stopReason:process.env.FAKE_PI_STOP_REASON ?? "stop",thinkingLevel:thinking,usage:{input:11,output:5,cacheRead:2,cacheWrite:1,reasoning:3,totalTokens:19,cost:{total:0.03}}}}));
 }
 if (process.env.FAKE_MODEL_EXITING_PATH) {
   writeFileSync(process.env.FAKE_MODEL_EXITING_PATH, String(process.pid));
@@ -144,13 +146,13 @@ function options(provider: Provider, suffix: string = provider): RunnerOptions {
     provider === "claude"
       ? "fable"
       : provider === "codex"
-        ? "gpt-5.6-sol"
-        : "grok-4.6";
+        ? "gpt-6.1-sol"
+        : "default";
   return {
     parent,
     provider,
     model,
-    effort: provider === "grok" ? "xhigh" : "max",
+    effort: provider === "pi" ? "high" : "max",
     mode: "read-only",
     promptPath: join(scratch, "prompt.md"),
     cwd: scratch,
@@ -224,8 +226,16 @@ beforeEach(() => {
   bin = join(scratch, "bin");
   mkdirSync(bin);
   writeFileSync(join(scratch, "prompt.md"), "Return the marker.");
-  for (const name of ["claude", "codex", "grok"]) makeExecutable(name);
+  for (const name of ["claude", "codex", "pi"]) makeExecutable(name);
+  piAgentDir = join(scratch, "pi-agent");
+  mkdirSync(piAgentDir);
+  writeFileSync(
+    join(piAgentDir, "settings.json"),
+    JSON.stringify({ defaultProvider: PI_DEFAULT_PROVIDER, defaultModel: PI_DEFAULT_MODEL })
+  );
   previousPath = process.env.PATH;
+  previousPiDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = piAgentDir;
   process.env.PATH = `${bin}:${dirname(process.execPath)}:${previousPath ?? ""}`;
   delete process.env.FAKE_TIMEOUT;
   delete process.env.FAKE_INVALID_MODEL;
@@ -240,18 +250,20 @@ beforeEach(() => {
   delete process.env.FAKE_MODEL_STARTED_PATH;
   delete process.env.FAKE_MODEL_EXITING_PATH;
   delete process.env.FAKE_REMOVE_EXECUTABLE_AFTER_PREFLIGHT;
-  delete process.env.FAKE_GROK_UNAUTH;
-  delete process.env.FAKE_GROK_TRANSIENT_UNAUTH_PATH;
-  delete process.env.FAKE_GROK_PREFLIGHT_LOG_PATH;
-  delete process.env.FAKE_GROK_MISSING_MODEL;
+  delete process.env.FAKE_PI_UNAUTH;
+  delete process.env.FAKE_PI_UNKNOWN_PROVIDER;
+  delete process.env.FAKE_PI_PREFLIGHT_LOG_PATH;
+  delete process.env.FAKE_PI_THINKING;
+  delete process.env.FAKE_PI_STOP_REASON;
   delete process.env.FAKE_DESCENDANT_HOLDS_PIPES_MS;
   delete process.env.FAKE_DESCENDANT_PID_PATH;
   delete process.env.FAKE_SELF_SIGNAL;
-  delete process.env.FAKE_GROK_ERROR_RESULT;
 });
 
 afterEach(() => {
   process.env.PATH = previousPath;
+  if (previousPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = previousPiDir;
   delete process.env.FAKE_TIMEOUT;
   delete process.env.FAKE_INVALID_MODEL;
   delete process.env.FAKE_CANCEL;
@@ -265,19 +277,16 @@ afterEach(() => {
   delete process.env.FAKE_MODEL_STARTED_PATH;
   delete process.env.FAKE_MODEL_EXITING_PATH;
   delete process.env.FAKE_REMOVE_EXECUTABLE_AFTER_PREFLIGHT;
-  delete process.env.FAKE_GROK_UNAUTH;
-  delete process.env.FAKE_GROK_TRANSIENT_UNAUTH_PATH;
-  delete process.env.FAKE_GROK_PREFLIGHT_LOG_PATH;
-  delete process.env.FAKE_GROK_MISSING_MODEL;
-  delete process.env.FAKE_DESCENDANT_HOLDS_PIPES_MS;
-  delete process.env.FAKE_DESCENDANT_PID_PATH;
-  delete process.env.FAKE_SELF_SIGNAL;
-  delete process.env.FAKE_GROK_ERROR_RESULT;
+  delete process.env.FAKE_PI_UNAUTH;
+  delete process.env.FAKE_PI_UNKNOWN_PROVIDER;
+  delete process.env.FAKE_PI_PREFLIGHT_LOG_PATH;
+  delete process.env.FAKE_PI_THINKING;
+  delete process.env.FAKE_PI_STOP_REASON;
   rmSync(scratch, { recursive: true, force: true });
 });
 
 describe("runLane", () => {
-  for (const provider of ["claude", "codex", "grok"] as const) {
+  for (const provider of ["claude", "codex", "pi"] as const) {
     it(`executes and receipts the ${provider} external lane`, async () => {
       const input = options(provider);
       const result = await runLane(input);
@@ -296,6 +305,14 @@ describe("runLane", () => {
       if (provider === "claude") {
         expect(receipt(input.receiptPath).reportedModel).toBe("claude-fable-9-9");
       }
+      if (provider === "pi") {
+        expect(receipt(input.receiptPath)).toMatchObject({
+          model: "default",
+          reportedModel: PI_RESOLVED_MODEL,
+          resolvedModel: PI_RESOLVED_MODEL,
+          appliedEffort: "high",
+        });
+      }
     });
   }
 
@@ -305,16 +322,18 @@ describe("runLane", () => {
     expect(result.exitCode).toBe(0);
     expect(receipt(input.receiptPath)).toMatchObject({
       status: "complete",
-      model: "gpt-5.6-sol",
+      model: "gpt-6.1-sol",
       reportedModel: null,
+      resolvedModel: null,
+      appliedEffort: null,
       modelVerified: false,
       modelEvidence: "pinned-argv",
     });
   });
 
-  it("keeps Grok's terminal error result in malformed-output evidence", async () => {
-    process.env.FAKE_GROK_ERROR_RESULT = "1";
-    const input = options("grok", "grok-error-result");
+  it("keeps pi's non-stop result in malformed-output evidence", async () => {
+    process.env.FAKE_PI_STOP_REASON = "error";
+    const input = options("pi", "pi-non-stop");
     const result = await runLane(input);
     expect(result.exitCode).toBe(65);
     expect(existsSync(input.outputPath)).toBe(false);
@@ -322,9 +341,10 @@ describe("runLane", () => {
     expect(recorded).toMatchObject({
       status: "malformed-output",
       exitCode: 0,
-      error: { message: "grok reported an error result" },
+      resolvedModel: PI_RESOLVED_MODEL,
+      appliedEffort: null,
     });
-    expect(recorded.error?.evidence).toContain('"stop_reason":"cancelled","errors":["cancelled"]');
+    expect(recorded.error?.evidence).toContain('"stopReason":"error"');
     expect(recorded.error?.evidence.length).toBeLessThanOrEqual(4_000);
   });
 
@@ -336,124 +356,40 @@ describe("runLane", () => {
     expect(existsSync(input.outputPath)).toBe(false);
     expect(receipt(input.receiptPath)).toMatchObject({
       status: "unavailable-model",
-      model: "gpt-5.6-sol",
+      model: "gpt-6.1-sol",
       reportedModel: null,
       modelVerified: false,
       modelEvidence: null,
     });
   });
 
-  it("retries a contradictory Grok authentication preflight before running the model", async () => {
-    const transientMarker = join(scratch, "grok-transient-unauth.seen");
-    const preflightLog = join(scratch, "grok-transient-unauth.log");
-    process.env.FAKE_GROK_TRANSIENT_UNAUTH_PATH = transientMarker;
-    process.env.FAKE_GROK_PREFLIGHT_LOG_PATH = preflightLog;
-    const modelStarted = join(scratch, "grok-transient-model.started");
+  it("classifies pi authentication failure from a single preflight", async () => {
+    process.env.FAKE_PI_UNAUTH = "1";
+    const preflightLog = join(scratch, "pi-unauthenticated.log");
+    process.env.FAKE_PI_PREFLIGHT_LOG_PATH = preflightLog;
+    const modelStarted = join(scratch, "pi-model.started");
     process.env.FAKE_MODEL_STARTED_PATH = modelStarted;
-    const input = options("grok", "grok-transient-unauth");
-    const result = await runLane(input);
-
-    expect(result.exitCode).toBe(0);
-    expect(readFileSync(preflightLog, "utf8")).toBe("attempt\nattempt\n");
-    expect(existsSync(modelStarted)).toBe(true);
-    expect(receipt(input.receiptPath)).toMatchObject({
-      status: "complete",
-      preflight: { status: "passed" },
-    });
-    expect(receipt(input.receiptPath).preflight.evidence).toContain(
-      "You are not authenticated."
-    );
-    expect(receipt(input.receiptPath).preflight.evidence).toContain(
-      "attempt 2 passed"
-    );
-  }, 10_000);
-
-  it("classifies Grok authentication failure after two consecutive preflights", async () => {
-    process.env.FAKE_GROK_UNAUTH = "1";
-    const preflightLog = join(scratch, "grok-unauthenticated.log");
-    process.env.FAKE_GROK_PREFLIGHT_LOG_PATH = preflightLog;
-    const modelStarted = join(scratch, "grok-model.started");
-    process.env.FAKE_MODEL_STARTED_PATH = modelStarted;
-    const input = options("grok", "grok-unauthenticated");
+    const input = options("pi", "pi-unauthenticated");
     const result = await runLane(input);
 
     expect(result.exitCode).toBe(77);
-    expect(readFileSync(preflightLog, "utf8")).toBe("attempt\nattempt\n");
+    expect(readFileSync(preflightLog, "utf8")).toBe("attempt\n");
     expect(existsSync(modelStarted)).toBe(false);
     expect(receipt(input.receiptPath)).toMatchObject({
       status: "unauthenticated",
+      reportedModel: null,
+      resolvedModel: PI_RESOLVED_MODEL,
       preflight: { status: "failed" },
     });
-    expect(receipt(input.receiptPath).preflight.evidence).toContain(
-      "attempt 2 failed"
-    );
-  }, 10_000);
-
-  it("counts the Grok retry delay against the wrapper deadline", async () => {
-    const transientMarker = join(scratch, "grok-deadline-unauth.seen");
-    const preflightLog = join(scratch, "grok-deadline-unauth.log");
-    process.env.FAKE_GROK_TRANSIENT_UNAUTH_PATH = transientMarker;
-    process.env.FAKE_GROK_PREFLIGHT_LOG_PATH = preflightLog;
-    const modelStarted = join(scratch, "grok-deadline-model.started");
-    process.env.FAKE_MODEL_STARTED_PATH = modelStarted;
-    const input = {
-      ...options("grok", "grok-preflight-retry-deadline"),
-      timeoutMs: 700,
-    };
-    const result = await runLane(input);
-    const recorded = receipt(input.receiptPath);
-
-    expect(result.exitCode).toBe(124);
-    expect(readFileSync(preflightLog, "utf8")).toBe("attempt\n");
-    expect(existsSync(modelStarted)).toBe(false);
-    expect(recorded).toMatchObject({
-      status: "timed-out",
-      preflight: { status: "timed-out" },
-    });
-    expect(recorded.preflight.evidence).toContain("You are not authenticated.");
-    expect(recorded.elapsedMs).toBeLessThan(1_200);
   });
 
-  it("cancels during the Grok retry delay without starting another preflight", async () => {
-    const transientMarker = join(scratch, "grok-cancel-unauth.pid");
-    const preflightLog = join(scratch, "grok-cancel-unauth.log");
-    const input = options("grok", "grok-preflight-retry-cancelled");
-    const runner = Bun.spawn([process.execPath, ...runnerArgs(input)], {
-      cwd: scratch,
-      env: {
-        ...process.env,
-        FAKE_GROK_TRANSIENT_UNAUTH_PATH: transientMarker,
-        FAKE_GROK_PREFLIGHT_LOG_PATH: preflightLog,
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const stdout = new Response(runner.stdout).text();
-    const stderr = new Response(runner.stderr).text();
-    await waitFor(transientMarker);
-    await waitForExit(Number(readFileSync(transientMarker, "utf8")));
-    await Bun.sleep(200);
-    runner.kill("SIGTERM");
-
-    expect(await exitWithin(runner, 2_000)).toBe(130);
-    await Promise.all([stdout, stderr]);
-    expect(readFileSync(preflightLog, "utf8")).toBe("attempt\n");
-    expect(receipt(input.receiptPath)).toMatchObject({
-      status: "cancelled",
-      preflight: { status: "cancelled" },
-      error: {
-        message: "launcher received SIGTERM during authentication preflight retry delay",
-      },
-    });
-  });
-
-  it("does not retry a Grok preflight with a missing model", async () => {
-    process.env.FAKE_GROK_MISSING_MODEL = "1";
-    const preflightLog = join(scratch, "grok-missing-model.log");
-    process.env.FAKE_GROK_PREFLIGHT_LOG_PATH = preflightLog;
-    const modelStarted = join(scratch, "grok-missing-model.started");
+  it("classifies a missing pi provider as unavailable-model without a retry", async () => {
+    process.env.FAKE_PI_UNKNOWN_PROVIDER = "1";
+    const preflightLog = join(scratch, "pi-unknown-provider.log");
+    process.env.FAKE_PI_PREFLIGHT_LOG_PATH = preflightLog;
+    const modelStarted = join(scratch, "pi-unknown-provider.started");
     process.env.FAKE_MODEL_STARTED_PATH = modelStarted;
-    const input = options("grok", "grok-missing-model");
+    const input = options("pi", "pi-unknown-provider");
     const result = await runLane(input);
 
     expect(result.exitCode).toBe(69);
@@ -463,6 +399,124 @@ describe("runLane", () => {
       status: "unavailable-model",
       preflight: { status: "failed" },
     });
+  });
+
+  it("reports a missing pi settings file without starting a child", async () => {
+    const emptyDir = join(scratch, "empty-pi-agent");
+    mkdirSync(emptyDir);
+    process.env.PI_CODING_AGENT_DIR = emptyDir;
+    const modelStarted = join(scratch, "pi-settings-model.started");
+    const preflightStarted = join(scratch, "pi-settings-preflight.started");
+    process.env.FAKE_MODEL_STARTED_PATH = modelStarted;
+    process.env.FAKE_PREFLIGHT_STARTED_PATH = preflightStarted;
+    const input = options("pi", "pi-settings-missing");
+    const result = await runLane(input);
+
+    expect(result.exitCode).toBe(69);
+    expect(existsSync(input.outputPath)).toBe(false);
+    expect(existsSync(modelStarted)).toBe(false);
+    expect(existsSync(preflightStarted)).toBe(false);
+    const recorded = receipt(input.receiptPath);
+    expect(recorded.status).toBe("unavailable-model");
+    expect(recorded.error?.evidence).toContain(join(emptyDir, "settings.json"));
+    expect(recorded.error?.evidence).toContain("not found");
+    expect(recorded.argv).toEqual([]);
+    expect(recorded.preflight).toEqual({ argv: [], status: "not-run", evidence: "" });
+  });
+
+  it("routes a non-file or unreadable pi settings path to unavailable-model", async () => {
+    const agentDir = join(scratch, "dir-pi-agent");
+    mkdirSync(join(agentDir, "settings.json"), { recursive: true });
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    const directoryInput = options("pi", "pi-settings-directory");
+    expect((await runLane(directoryInput)).exitCode).toBe(69);
+    const directoryReceipt = receipt(directoryInput.receiptPath);
+    expect(directoryReceipt.status).toBe("unavailable-model");
+    expect(directoryReceipt.error?.evidence).toContain(
+      join(agentDir, "settings.json")
+    );
+    expect(directoryReceipt.error?.evidence).toContain("not a regular file");
+    expect(directoryReceipt.argv).toEqual([]);
+    expect(existsSync(directoryInput.outputPath)).toBe(false);
+    expect(existsSync(directoryInput.receiptPath)).toBe(true);
+
+    const fileDir = join(scratch, "unreadable-pi-agent");
+    mkdirSync(fileDir);
+    const settingsPath = join(fileDir, "settings.json");
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({ defaultProvider: "magpie", defaultModel: "m" })
+    );
+    chmodSync(settingsPath, 0o000);
+    process.env.PI_CODING_AGENT_DIR = fileDir;
+    const fileInput = options("pi", "pi-settings-unreadable");
+    expect((await runLane(fileInput)).exitCode).toBe(69);
+    chmodSync(settingsPath, 0o600);
+    const fileReceipt = receipt(fileInput.receiptPath);
+    expect(fileReceipt.status).toBe("unavailable-model");
+    expect(fileReceipt.error?.evidence).toContain(settingsPath);
+    expect(existsSync(fileInput.outputPath)).toBe(false);
+    expect(existsSync(fileInput.receiptPath)).toBe(true);
+  });
+
+  it("does not trim PI_CODING_AGENT_DIR and keeps a trailing space", async () => {
+    const configured = `${join(scratch, "pi-agent")} `;
+    process.env.PI_CODING_AGENT_DIR = configured;
+    const input = options("pi", "pi-settings-trailing-space");
+    const result = await runLane(input);
+    expect(result.exitCode).toBe(69);
+    const recorded = receipt(input.receiptPath);
+    expect(recorded.status).toBe("unavailable-model");
+    expect(recorded.error?.evidence).toContain(
+      join(configured, "settings.json")
+    );
+  });
+
+  it("reports malformed pi settings and a missing defaultModel", async () => {
+    process.env.PI_CODING_AGENT_DIR = join(scratch, "broken-pi-agent");
+    mkdirSync(process.env.PI_CODING_AGENT_DIR);
+    const settingsPath = join(process.env.PI_CODING_AGENT_DIR, "settings.json");
+
+    writeFileSync(settingsPath, "{not json");
+    const malformed = options("pi", "pi-settings-malformed");
+    expect((await runLane(malformed)).exitCode).toBe(69);
+    expect(receipt(malformed.receiptPath).error?.evidence).toContain(
+      "not valid JSON"
+    );
+
+    writeFileSync(settingsPath, JSON.stringify({ defaultProvider: "magpie" }));
+    const missingModel = options("pi", "pi-settings-missing-model");
+    expect((await runLane(missingModel)).exitCode).toBe(69);
+    expect(receipt(missingModel.receiptPath).error?.evidence).toContain(
+      "defaultModel"
+    );
+  });
+
+  it("classifies a pi applied thinking mismatch as unavailable-model", async () => {
+    process.env.FAKE_PI_THINKING = "low";
+    const input = options("pi", "pi-effort-mismatch");
+    const result = await runLane(input);
+
+    expect(result.exitCode).toBe(69);
+    expect(existsSync(input.outputPath)).toBe(false);
+    const recorded = receipt(input.receiptPath);
+    expect(recorded).toMatchObject({
+      status: "unavailable-model",
+      appliedEffort: "low",
+      resolvedModel: PI_RESOLVED_MODEL,
+    });
+    expect(recorded.error?.message).toBe(
+      "pi applied thinking low, requested high"
+    );
+  });
+
+  it("rejects a pi model other than the literal default", async () => {
+    const input = { ...options("pi"), model: "gpt-6.1-sol" };
+    await expect(runLane(input)).rejects.toThrow(
+      "pi model must be the literal default"
+    );
+    expect(existsSync(input.outputPath)).toBe(false);
+    expect(existsSync(input.receiptPath)).toBe(false);
   });
 
   it("kills a timed-out child and preserves a failure receipt", async () => {
@@ -822,7 +876,7 @@ describe("runLane", () => {
   it("reports a missing CLI without fabricating output", async () => {
     process.env.PATH = join(scratch, "empty-bin");
     mkdirSync(process.env.PATH);
-    const input = options("grok");
+    const input = options("pi");
     const result = await runLane(input);
     expect(result.exitCode).toBe(69);
     expect(existsSync(input.outputPath)).toBe(false);
@@ -830,13 +884,13 @@ describe("runLane", () => {
   });
 
   it("runs simultaneous same-provider lanes only into their unique paths", async () => {
-    const first = options("grok", "first");
-    const second = options("grok", "second");
+    const first = options("pi", "first");
+    const second = options("pi", "second");
     const results = await Promise.all([runLane(first), runLane(second)]);
     expect(results.map((result) => result.exitCode)).toEqual([0, 0]);
     expect(first.outputPath).not.toBe(second.outputPath);
-    expect(receipt(first.receiptPath).sessionId).toBe("g1");
-    expect(receipt(second.receiptPath).sessionId).toBe("g1");
+    expect(receipt(first.receiptPath).sessionId).toBe("p1");
+    expect(receipt(second.receiptPath).sessionId).toBe("p1");
   });
 
   it("refuses a second writer for an already-reserved path", async () => {
@@ -949,7 +1003,7 @@ describe("childEnvironment", () => {
       CODEX_CI: "1",
       KEEP_ME: "yes",
     });
-    expect(childEnvironment("grok", source)).toEqual({
+    expect(childEnvironment("pi", source)).toEqual({
       PATH: "/bin",
       KEEP_ME: "yes",
     });

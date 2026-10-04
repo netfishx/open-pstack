@@ -8,8 +8,14 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { invocationCommand, preflightCommand, type CommandSpec } from "./commands.ts";
+import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import {
+  invocationCommand,
+  preflightCommand,
+  type CommandSpec,
+  type LaneTarget,
+} from "./commands.ts";
 import { versionedClaudeAlias } from "./model-aliases.ts";
 import { parseProviderOutput, reportedModelMatches } from "./parse-output.ts";
 import type {
@@ -21,7 +27,6 @@ import type {
 import { UsageError } from "./types.ts";
 
 const ERROR_EVIDENCE_LIMIT = 4_000;
-const GROK_PREFLIGHT_RETRY_DELAY_MS = 5_000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 interface ProcessResult {
@@ -40,8 +45,6 @@ interface RunCancellation {
   readonly signal: CancellationSignal | null;
   dispose(): void;
 }
-
-type RetryWaitResult = "ready" | "cancelled" | "timed-out";
 
 export interface RunResult {
   readonly exitCode: number;
@@ -327,35 +330,119 @@ async function runProcess(
   }
 }
 
-async function waitForGrokPreflightRetry(
-  deadlineAt: number | null,
-  cancellation: RunCancellation
-): Promise<RetryWaitResult> {
-  if (cancellation.signal !== null) return "cancelled";
+function piSettingsPath(env: NodeJS.ProcessEnv): string {
+  const configured = env.PI_CODING_AGENT_DIR;
+  const directory = configured === undefined || configured === ""
+    ? join(homedir(), ".pi", "agent")
+    : expandHome(configured);
+  return join(directory, "settings.json");
+}
 
-  const now = Date.now();
-  if (deadlineAt !== null && now >= deadlineAt) return "timed-out";
+function expandHome(value: string): string {
+  if (value === "~") return homedir();
+  if (value.startsWith("~/")) return join(homedir(), value.slice(2));
+  return value;
+}
 
-  const retryAt = now + GROK_PREFLIGHT_RETRY_DELAY_MS;
-  const wakeAt = deadlineAt === null ? retryAt : Math.min(retryAt, deadlineAt);
-  const timerResult: RetryWaitResult = wakeAt < retryAt ? "timed-out" : "ready";
-  let timer: ReturnType<typeof setTimeout> | null = null;
+function errorReason(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+type LaneResolution =
+  | { readonly kind: "resolved"; readonly target: LaneTarget }
+  | { readonly kind: "unavailable"; readonly evidence: string };
+
+function resolvePiTarget(env: NodeJS.ProcessEnv): LaneResolution {
+  let settingsPath: string;
   try {
-    const result = await Promise.race([
-      cancellation.promise.then((): RetryWaitResult => "cancelled"),
-      new Promise<RetryWaitResult>((resolve) => {
-        timer = setTimeout(() => resolve(timerResult), wakeAt - now);
-      }),
-    ]);
-    if (cancellation.signal !== null) return "cancelled";
-    if (deadlineAt !== null && Date.now() >= deadlineAt) return "timed-out";
-    return result;
-  } finally {
-    if (timer !== null) clearTimeout(timer);
+    settingsPath = piSettingsPath(env);
+  } catch (error) {
+    return {
+      kind: "unavailable",
+      evidence: `pi settings path could not be resolved: ${errorReason(error)}`,
+    };
+  }
+
+  let stats: ReturnType<typeof statSync>;
+  try {
+    stats = statSync(settingsPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return {
+      kind: "unavailable",
+      evidence: code === "ENOENT"
+        ? `pi settings file not found: ${settingsPath}`
+        : `pi settings path is unreadable: ${settingsPath}: ${errorReason(error)}`,
+    };
+  }
+  if (!stats.isFile()) {
+    return {
+      kind: "unavailable",
+      evidence: `pi settings path is not a regular file: ${settingsPath}`,
+    };
+  }
+
+  let contents: string;
+  try {
+    contents = readFileSync(settingsPath, "utf8");
+  } catch (error) {
+    return {
+      kind: "unavailable",
+      evidence: `pi settings file is unreadable: ${settingsPath}: ${errorReason(error)}`,
+    };
+  }
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(contents);
+  } catch (error) {
+    return {
+      kind: "unavailable",
+      evidence: `pi settings file is not valid JSON: ${settingsPath}: ${errorReason(error)}`,
+    };
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return {
+      kind: "unavailable",
+      evidence: `pi settings file is not a JSON object: ${settingsPath}`,
+    };
+  }
+  const settings = raw as Record<string, unknown>;
+  const provider = settings.defaultProvider;
+  const model = settings.defaultModel;
+  if (typeof provider !== "string" || provider.length === 0) {
+    return {
+      kind: "unavailable",
+      evidence: `pi settings file ${settingsPath} is missing a string defaultProvider`,
+    };
+  }
+  if (typeof model !== "string" || model.length === 0) {
+    return {
+      kind: "unavailable",
+      evidence: `pi settings file ${settingsPath} is missing a string defaultModel`,
+    };
+  }
+  return {
+    kind: "resolved",
+    target: { provider: "pi", model, defaultProvider: provider },
+  };
+}
+
+function resolveLaneTarget(
+  options: RunnerOptions,
+  env: NodeJS.ProcessEnv
+): LaneResolution {
+  switch (options.provider) {
+    case "claude":
+      return { kind: "resolved", target: { provider: "claude", model: options.model } };
+    case "codex":
+      return { kind: "resolved", target: { provider: "codex", model: options.model } };
+    case "pi":
+      return resolvePiTarget(env);
   }
 }
 
-function preflightPassed(provider: Provider, model: string, result: ProcessResult): boolean {
+function preflightPassed(provider: Provider, result: ProcessResult): boolean {
   if (result.exitCode !== 0 || result.timedOut) return false;
   const combined = `${result.stdout}\n${result.stderr}`;
   switch (provider) {
@@ -373,14 +460,24 @@ function preflightPassed(provider: Provider, model: string, result: ProcessResul
     }
     case "codex":
       return /logged in/i.test(combined);
-    case "grok":
-      return /logged in/i.test(combined) && combined.includes(model);
+    case "pi": {
+      try {
+        const value: unknown = JSON.parse(result.stdout);
+        return (
+          value !== null &&
+          typeof value === "object" &&
+          (value as { status?: unknown }).status === "ready"
+        );
+      } catch {
+        return false;
+      }
+    }
   }
 }
 
 function successfulPreflightEvidence(provider: Provider, model: string): string {
-  return provider === "grok"
-    ? `authenticated; model ${model} available`
+  return provider === "pi"
+    ? `authenticated; default model ${model}`
     : "authenticated";
 }
 
@@ -394,29 +491,32 @@ function unavailableStatus(value: string): ReceiptStatus {
   return "child-failed";
 }
 
-function preflightFailureStatus(
-  provider: Provider,
-  model: string,
-  value: string
-): ReceiptStatus {
-  const status = unavailableStatus(value);
-  if (status !== "child-failed") return status;
-  return provider === "grok" && !value.includes(model)
+// pi auth check reports a machine-readable status and reason instead of prose.
+function piPreflightFailureStatus(value: string): ReceiptStatus {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value.trim());
+  } catch {
+    return "unauthenticated";
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return "unauthenticated";
+  }
+  const reason = (parsed as { reason?: unknown }).reason;
+  return typeof reason === "string" && /provider|model/i.test(reason)
     ? "unavailable-model"
     : "unauthenticated";
 }
 
-function retriedPreflightEvidence(
-  first: string,
-  second: string,
-  secondPassed: boolean
-): string {
-  const firstLabel = "attempt 1 failed:\n";
-  const secondLabel = `\n\nattempt 2 ${secondPassed ? "passed" : "failed"}:\n`;
-  const payloadLimit = ERROR_EVIDENCE_LIMIT - firstLabel.length - secondLabel.length;
-  const firstLimit = Math.floor(payloadLimit / 2);
-  const secondLimit = payloadLimit - firstLimit;
-  return `${firstLabel}${first.slice(0, firstLimit)}${secondLabel}${second.slice(0, secondLimit)}`;
+function preflightFailureStatus(
+  provider: Provider,
+  value: string
+): ReceiptStatus {
+  const status = unavailableStatus(value);
+  if (status !== "child-failed") return status;
+  return provider === "pi"
+    ? piPreflightFailureStatus(value)
+    : "unauthenticated";
 }
 
 function statusExitCode(status: ReceiptStatus): number {
@@ -487,6 +587,44 @@ function completeReceipt(
   };
 }
 
+function writePiSettingsFailure(
+  options: RunnerOptions,
+  started: number,
+  detail: string
+): RunResult {
+  const completed = Date.now();
+  const receipt = completeReceipt(options, {
+    status: "unavailable-model",
+    startedAt: new Date(started).toISOString(),
+    completedAt: new Date(completed).toISOString(),
+    elapsedMs: completed - started,
+    executable: null,
+    preflight: {
+      argv: [],
+      status: "not-run",
+      evidence: "",
+    },
+    argv: [],
+    exitCode: null,
+    signal: null,
+    reportedModel: null,
+    resolvedModel: null,
+    modelVerified: false,
+    modelEvidence: null,
+    sessionId: null,
+    usage: null,
+    costUsd: null,
+    appliedEffort: null,
+    error: {
+      message: "pi default model settings are unavailable",
+      evidence: detail,
+    },
+  });
+  removeIfExists(options.outputPath);
+  writeReceipt(options.receiptPath, receipt);
+  return { exitCode: statusExitCode("unavailable-model"), receipt };
+}
+
 export function validateOptions(options: RunnerOptions): void {
   if (options.parent === options.provider) {
     throw new UsageError(
@@ -494,6 +632,9 @@ export function validateOptions(options: RunnerOptions): void {
     );
   }
   if (options.model.trim().length === 0) throw new UsageError("model must not be empty");
+  if (options.provider === "pi" && options.model !== "default") {
+    throw new UsageError("pi model must be the literal default");
+  }
   const staleAlias = options.provider === "claude"
     ? versionedClaudeAlias(options.model)
     : null;
@@ -535,11 +676,16 @@ async function executeLane(
   deadlineAt: number | null,
   invocation: CommandSpec,
   preflight: CommandSpec,
-  progress: LaneProgress
+  progress: LaneProgress,
+  target: LaneTarget
 ): Promise<RunResult> {
   const startedAt = new Date(started).toISOString();
   const prompt = readFileSync(options.promptPath, "utf8");
   const env = childEnvironment(options.provider);
+  const effectiveModel = target.provider === "pi"
+    ? `${target.defaultProvider}/${target.model}`
+    : target.model;
+  const resolvedModel = target.provider === "pi" ? effectiveModel : null;
   const executable = Bun.which(invocation.command, {
     PATH: env.PATH,
     cwd: options.cwd,
@@ -570,11 +716,13 @@ async function executeLane(
       exitCode: null,
       signal: null,
       reportedModel: null,
+      resolvedModel,
       modelVerified: false,
       modelEvidence: null,
       sessionId: null,
       usage: null,
       costUsd: null,
+      appliedEffort: null,
       error: {
         message: receivedSignal === null
           ? `explicit deadline elapsed ${phase}`
@@ -607,11 +755,13 @@ async function executeLane(
       exitCode: null,
       signal: null,
       reportedModel: null,
+      resolvedModel,
       modelVerified: false,
       modelEvidence: null,
       sessionId: null,
       usage: null,
       costUsd: null,
+      appliedEffort: null,
       error: {
         message: `${invocation.command} executable not found`,
         evidence: "",
@@ -633,59 +783,10 @@ async function executeLane(
     cancellation
   );
   let rawPreflightEvidence = evidence(`${preflightResult.stdout}\n${preflightResult.stderr}`);
-  let passed = preflightPassed(options.provider, options.model, preflightResult);
+  let passed = preflightPassed(options.provider, preflightResult);
   let preflightEvidence = passed
-    ? successfulPreflightEvidence(options.provider, options.model)
+    ? successfulPreflightEvidence(options.provider, effectiveModel)
     : rawPreflightEvidence;
-
-  if (
-    options.provider === "grok" &&
-    !passed &&
-    preflightResult.cancelledBy === null &&
-    !preflightResult.timedOut &&
-    preflightFailureStatus(options.provider, options.model, rawPreflightEvidence) ===
-      "unauthenticated"
-  ) {
-    preflightState = {
-      argv: [preflightExecutable, ...preflight.args],
-      status: "failed",
-      evidence: rawPreflightEvidence,
-    };
-    progress.preflight = preflightState;
-
-    const retryWait = await waitForGrokPreflightRetry(deadlineAt, cancellation);
-    if (retryWait !== "ready") {
-      preflightState = {
-        ...preflightState,
-        status: retryWait === "cancelled" ? "cancelled" : "timed-out",
-      };
-      progress.preflight = preflightState;
-      return finishWithoutChild(
-        retryWait === "cancelled" ? "cancelled" : "timed-out",
-        "during authentication preflight retry delay"
-      );
-    }
-
-    const firstPreflightEvidence = rawPreflightEvidence;
-    preflightResult = await runProcess(
-      preflightExecutable,
-      preflight,
-      options.cwd,
-      env,
-      "",
-      deadlineAt,
-      cancellation
-    );
-    rawPreflightEvidence = evidence(`${preflightResult.stdout}\n${preflightResult.stderr}`);
-    passed = preflightPassed(options.provider, options.model, preflightResult);
-    preflightEvidence = retriedPreflightEvidence(
-      firstPreflightEvidence,
-      passed
-        ? successfulPreflightEvidence(options.provider, options.model)
-        : rawPreflightEvidence,
-      passed
-    );
-  }
 
   preflightState = {
     argv: [preflightExecutable, ...preflight.args],
@@ -704,7 +805,6 @@ async function executeLane(
     const completed = Date.now();
     const preflightFailure = preflightFailureStatus(
       options.provider,
-      options.model,
       rawPreflightEvidence
     );
     const status: ReceiptStatus = preflightResult.cancelledBy !== null
@@ -723,11 +823,13 @@ async function executeLane(
       exitCode: preflightResult.exitCode,
       signal: preflightResult.signal,
       reportedModel: null,
+      resolvedModel,
       modelVerified: false,
       modelEvidence: null,
       sessionId: null,
       usage: null,
       costUsd: null,
+      appliedEffort: null,
       error: {
         message: preflightResult.cancelledBy !== null
           ? `launcher received ${preflightResult.cancelledBy} during preflight`
@@ -782,11 +884,13 @@ async function executeLane(
       ...base,
       status,
       reportedModel: null,
+      resolvedModel,
       modelVerified: false,
       modelEvidence: null,
       sessionId: null,
       usage: null,
       costUsd: null,
+      appliedEffort: null,
       error: {
         message: result.cancelledBy !== null
           ? result.signal === result.cancelledBy
@@ -808,23 +912,44 @@ async function executeLane(
       options.provider,
       result.stdout,
       result.stderr,
-      options.model
+      effectiveModel
     );
     const proof = modelProof(
       options.provider,
-      options.model,
+      effectiveModel,
       parsed.reportedModel
     );
     if (!proof.modelVerified && proof.modelEvidence !== "pinned-argv") {
       throw new Error(
-        `requested model ${options.model} was not reported by ${options.provider}`
+        `requested model ${effectiveModel} was not reported by ${options.provider}`
       );
+    }
+    if (options.provider === "pi" && parsed.appliedEffort !== options.effort) {
+      removeIfExists(options.outputPath);
+      receipt = completeReceipt(options, {
+        ...base,
+        status: "unavailable-model",
+        ...proof,
+        resolvedModel,
+        appliedEffort: parsed.appliedEffort,
+        sessionId: parsed.sessionId,
+        usage: parsed.usage,
+        costUsd: parsed.costUsd,
+        error: {
+          message: `pi applied thinking ${String(parsed.appliedEffort)}, requested ${options.effort}`,
+          evidence: "",
+        },
+      });
+      writeReceipt(options.receiptPath, receipt);
+      return { exitCode: statusExitCode(receipt.status), receipt };
     }
     writeFileSync(options.outputPath, parsed.text, { encoding: "utf8", mode: 0o600 });
     receipt = completeReceipt(options, {
       ...base,
       status: "complete",
       ...proof,
+      resolvedModel,
+      appliedEffort: parsed.appliedEffort,
       sessionId: parsed.sessionId,
       usage: parsed.usage,
       costUsd: parsed.costUsd,
@@ -837,11 +962,13 @@ async function executeLane(
       ...base,
       status: "malformed-output",
       reportedModel: null,
+      resolvedModel,
       modelVerified: false,
       modelEvidence: null,
       sessionId: null,
       usage: null,
       costUsd: null,
+      appliedEffort: null,
       error: {
         message,
         evidence: trailingEvidence(`${result.stderr}\n${result.stdout}`),
@@ -859,20 +986,28 @@ export async function runLane(
 ): Promise<RunResult> {
   validateOptions(options);
   const deadlineAt = options.timeoutMs === null ? null : started + options.timeoutMs;
-  const invocation = invocationCommand(options);
-  const preflight = preflightCommand(options.provider);
-  const progress: LaneProgress = {
-    executable: null,
-    preflight: {
-      argv: [preflight.command, ...preflight.args],
-      status: "not-run",
-      evidence: "",
-    },
-    argv: [invocation.command, ...invocation.args],
-  };
   const cancellation = installRunCancellation();
   try {
     reserveOutputs(options);
+    const resolution = resolveLaneTarget(options, process.env);
+    if (resolution.kind === "unavailable") {
+      return writePiSettingsFailure(options, started, resolution.evidence);
+    }
+    const target = resolution.target;
+    const resolvedModel = target.provider === "pi"
+      ? `${target.defaultProvider}/${target.model}`
+      : null;
+    const invocation = invocationCommand(options, target);
+    const preflight = preflightCommand(target);
+    const progress: LaneProgress = {
+      executable: null,
+      preflight: {
+        argv: [preflight.command, ...preflight.args],
+        status: "not-run",
+        evidence: "",
+      },
+      argv: [invocation.command, ...invocation.args],
+    };
     try {
       return await executeLane(
         options,
@@ -881,7 +1016,8 @@ export async function runLane(
         deadlineAt,
         invocation,
         preflight,
-        progress
+        progress,
+        target
       );
     } catch (error) {
       const completed = Date.now();
@@ -906,11 +1042,13 @@ export async function runLane(
         exitCode: null,
         signal: null,
         reportedModel: null,
+        resolvedModel,
         modelVerified: false,
         modelEvidence: null,
         sessionId: null,
         usage: null,
         costUsd: null,
+        appliedEffort: null,
         error: {
           message: status === "cancelled"
             ? `launcher received ${signal} after reserving output paths`

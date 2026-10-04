@@ -2,16 +2,19 @@ import { describe, expect, it } from "bun:test";
 import { join } from "node:path";
 import { parseArgs } from "./cli.ts";
 
-function argv(extra: readonly string[] = []): string[] {
+function argv(
+  values: { provider?: string; model?: string } = {},
+  extra: readonly string[] = []
+): string[] {
   return [
     "--parent",
     "claude",
     "--provider",
-    "codex",
+    values.provider ?? "codex",
     "--model",
-    "gpt-5.6-sol",
+    values.model ?? "gpt-6.1-sol",
     "--effort",
-    "max",
+    "high",
     "--mode",
     "read-only",
     "--prompt",
@@ -32,12 +35,18 @@ describe("runner CLI parsing", () => {
   });
 
   it("honors an explicit positive timeout", () => {
-    expect(parseArgs(argv(["--timeout", "5400"]))?.timeoutMs).toBe(5_400_000);
+    expect(parseArgs(argv({}, ["--timeout", "5400"]))?.timeoutMs).toBe(5_400_000);
   });
 
   it("rejects a non-positive timeout", () => {
-    expect(() => parseArgs(argv(["--timeout", "0"]))).toThrow(
+    expect(() => parseArgs(argv({}, ["--timeout", "0"]))).toThrow(
       "greater than zero"
     );
+  });
+
+  it("accepts the pi provider with the literal default model", () => {
+    const parsed = parseArgs(argv({ provider: "pi", model: "default" }));
+    expect(parsed?.provider).toBe("pi");
+    expect(parsed?.model).toBe("default");
   });
 });

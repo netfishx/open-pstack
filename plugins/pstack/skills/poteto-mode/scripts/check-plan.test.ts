@@ -14,7 +14,7 @@ const FORBIDDEN_FENCE = [
   "control-ui",
   "control-cli",
   "git show origin/main:",
-  "grok-4.6-fast-xhigh",
+  "pi:default@high",
   "~/.claude",
   "../references/",
   "/tmp",
@@ -340,11 +340,11 @@ describe("check-plan", () => {
       "live box is not a lane",
     ],
     [
-      "a hard-coded Cursor Grok string",
+      "a hard-coded pi descriptor",
       replaceOnce(
         skeleton,
         CONTRACT.laneSentence,
-        "Ten lanes on `grok-4.6-fast-xhigh` at the PR head",
+        "Ten lanes on `pi:default@high` at the PR head",
       ),
       `Verify, live lacks "${CONTRACT.laneSentence}"`,
     ],
