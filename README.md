@@ -84,7 +84,7 @@ Setup checks the models you can actually run, shows how each one will start, and
 
 An older model sheet starts using the rolling aliases in memory as soon as this release is installed. Run setup once after updating to persist that migration. It replaces versioned Fable and Opus entries while preserving every role assignment and effort selection.
 
-A model sheet from an earlier release keeps its panel. To take the new defaults, delete those role lines and run setup again; setup fills missing roles from the defaults. An entry from an earlier release keeps running until the next setup run asks you to replace it.
+A model sheet from an earlier release keeps its panel. To take the new defaults, delete those role lines and run setup again; setup fills missing roles from the defaults. Grok is removed in 1.6.0, and the matrix no longer accepts `codex:gpt-5.6-sol@*`. The runner rejects a `grok:*` entry written by 1.5.0 or earlier with a `UsageError`. Setup rejects a `codex:gpt-5.6-sol@*` entry as outside the matrix. Rerun `/setup-pstack` to move those roles onto the new families.
 
 ### 2. Use poteto-mode
 

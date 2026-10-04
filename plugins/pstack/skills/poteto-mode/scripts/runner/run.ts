@@ -331,8 +331,8 @@ async function runProcess(
 }
 
 function piSettingsPath(env: NodeJS.ProcessEnv): string {
-  const configured = env.PI_CODING_AGENT_DIR?.trim();
-  const directory = configured === undefined || configured.length === 0
+  const configured = env.PI_CODING_AGENT_DIR;
+  const directory = configured === undefined || configured === ""
     ? join(homedir(), ".pi", "agent")
     : expandHome(configured);
   return join(directory, "settings.json");
@@ -344,25 +344,61 @@ function expandHome(value: string): string {
   return value;
 }
 
+function errorReason(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 type LaneResolution =
   | { readonly kind: "resolved"; readonly target: LaneTarget }
   | { readonly kind: "unavailable"; readonly evidence: string };
 
 function resolvePiTarget(env: NodeJS.ProcessEnv): LaneResolution {
-  const settingsPath = piSettingsPath(env);
-  if (!existsSync(settingsPath) || !statSync(settingsPath).isFile()) {
+  let settingsPath: string;
+  try {
+    settingsPath = piSettingsPath(env);
+  } catch (error) {
     return {
       kind: "unavailable",
-      evidence: `pi settings file not found: ${settingsPath}`,
+      evidence: `pi settings path could not be resolved: ${errorReason(error)}`,
     };
   }
-  let raw: unknown;
+
+  let stats: ReturnType<typeof statSync>;
   try {
-    raw = JSON.parse(readFileSync(settingsPath, "utf8"));
-  } catch {
+    stats = statSync(settingsPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
     return {
       kind: "unavailable",
-      evidence: `pi settings file is not valid JSON: ${settingsPath}`,
+      evidence: code === "ENOENT"
+        ? `pi settings file not found: ${settingsPath}`
+        : `pi settings path is unreadable: ${settingsPath}: ${errorReason(error)}`,
+    };
+  }
+  if (!stats.isFile()) {
+    return {
+      kind: "unavailable",
+      evidence: `pi settings path is not a regular file: ${settingsPath}`,
+    };
+  }
+
+  let contents: string;
+  try {
+    contents = readFileSync(settingsPath, "utf8");
+  } catch (error) {
+    return {
+      kind: "unavailable",
+      evidence: `pi settings file is unreadable: ${settingsPath}: ${errorReason(error)}`,
+    };
+  }
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(contents);
+  } catch (error) {
+    return {
+      kind: "unavailable",
+      evidence: `pi settings file is not valid JSON: ${settingsPath}: ${errorReason(error)}`,
     };
   }
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
@@ -564,11 +600,11 @@ function writePiSettingsFailure(
     elapsedMs: completed - started,
     executable: null,
     preflight: {
-      argv: ["pi", "auth", "check", "--json"],
+      argv: [],
       status: "not-run",
       evidence: "",
     },
-    argv: ["pi"],
+    argv: [],
     exitCode: null,
     signal: null,
     reportedModel: null,

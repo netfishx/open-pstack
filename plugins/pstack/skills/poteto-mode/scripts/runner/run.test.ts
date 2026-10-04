@@ -420,6 +420,56 @@ describe("runLane", () => {
     expect(recorded.status).toBe("unavailable-model");
     expect(recorded.error?.evidence).toContain(join(emptyDir, "settings.json"));
     expect(recorded.error?.evidence).toContain("not found");
+    expect(recorded.argv).toEqual([]);
+    expect(recorded.preflight).toEqual({ argv: [], status: "not-run", evidence: "" });
+  });
+
+  it("routes a non-file or unreadable pi settings path to unavailable-model", async () => {
+    const agentDir = join(scratch, "dir-pi-agent");
+    mkdirSync(join(agentDir, "settings.json"), { recursive: true });
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    const directoryInput = options("pi", "pi-settings-directory");
+    expect((await runLane(directoryInput)).exitCode).toBe(69);
+    const directoryReceipt = receipt(directoryInput.receiptPath);
+    expect(directoryReceipt.status).toBe("unavailable-model");
+    expect(directoryReceipt.error?.evidence).toContain(
+      join(agentDir, "settings.json")
+    );
+    expect(directoryReceipt.error?.evidence).toContain("not a regular file");
+    expect(directoryReceipt.argv).toEqual([]);
+    expect(existsSync(directoryInput.outputPath)).toBe(false);
+    expect(existsSync(directoryInput.receiptPath)).toBe(true);
+
+    const fileDir = join(scratch, "unreadable-pi-agent");
+    mkdirSync(fileDir);
+    const settingsPath = join(fileDir, "settings.json");
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({ defaultProvider: "magpie", defaultModel: "m" })
+    );
+    chmodSync(settingsPath, 0o000);
+    process.env.PI_CODING_AGENT_DIR = fileDir;
+    const fileInput = options("pi", "pi-settings-unreadable");
+    expect((await runLane(fileInput)).exitCode).toBe(69);
+    chmodSync(settingsPath, 0o600);
+    const fileReceipt = receipt(fileInput.receiptPath);
+    expect(fileReceipt.status).toBe("unavailable-model");
+    expect(fileReceipt.error?.evidence).toContain(settingsPath);
+    expect(existsSync(fileInput.outputPath)).toBe(false);
+    expect(existsSync(fileInput.receiptPath)).toBe(true);
+  });
+
+  it("does not trim PI_CODING_AGENT_DIR and keeps a trailing space", async () => {
+    const configured = `${join(scratch, "pi-agent")} `;
+    process.env.PI_CODING_AGENT_DIR = configured;
+    const input = options("pi", "pi-settings-trailing-space");
+    const result = await runLane(input);
+    expect(result.exitCode).toBe(69);
+    const recorded = receipt(input.receiptPath);
+    expect(recorded.status).toBe("unavailable-model");
+    expect(recorded.error?.evidence).toContain(
+      join(configured, "settings.json")
+    );
   });
 
   it("reports malformed pi settings and a missing defaultModel", async () => {
